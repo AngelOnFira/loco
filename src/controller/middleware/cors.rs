@@ -89,48 +89,66 @@ impl Cors {
     /// In all of these cases, the error returned will be the result of the
     /// `parse` method of the corresponding type.
     pub fn cors(&self) -> Result<cors::CorsLayer> {
-        let mut cors: cors::CorsLayer = cors::CorsLayer::permissive();
+        let mut cors = cors::CorsLayer::new();
 
-        let mut list = vec![];
-
-        // testing CORS, assuming https://example.com in the allow list:
-        // $ curl -v --request OPTIONS 'localhost:5150/api/_ping' -H 'Origin: https://example.com' -H 'Acces
-        // look for '< access-control-allow-origin: https://example.com' in response.
-        // if it doesn't appear (test with a bogus domain), it is not allowed.
-        for origin in &self.allow_origins {
-            list.push(origin.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_origin(list);
-        }
-
-        let mut list = vec![];
-        for header in &self.allow_headers {
-            list.push(header.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_headers(list);
-        }
-
-        let mut list = vec![];
-        for method in &self.allow_methods {
-            list.push(method.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_methods(list);
+        if self.allow_origins.contains(&"any".to_string()) {
+            cors = cors.allow_origin(cors::Any);
+        } else if !self.allow_origins.is_empty() {
+            let allowed_origins = self.allow_origins.clone();
+            // panic!("allowed_origins: {:#?}", allowed_origins);
+            // tracing::info!("allowed: {allowed}, origin: {}", origin.to_str().unwrap());
+            cors = cors.allow_origin(cors::AllowOrigin::predicate(
+                move |origin: &axum::http::HeaderValue,
+                      _request_parts: &axum::http::request::Parts| {
+                    let origin_str = origin.to_str().unwrap_or_default();
+                    allowed_origins.iter().any(|allowed| {
+                        let origin_url = url::Url::parse(origin_str).ok();
+                        match origin_url {
+                            Some(url) => {
+                                // Compare host (domain) parts only
+                                let host = url.host_str().unwrap_or_default();
+                                host == allowed.trim_end_matches('/')
+                            }
+                            None => origin_str.trim_end_matches('/') == allowed.trim_end_matches('/'),
+                        }
+                    })
+                },
+            ));
         }
 
-        let mut list = vec![];
-        for v in &self.vary {
-            list.push(v.parse()?);
+        if !self.allow_headers.is_empty() {
+            let headers = self
+                .allow_headers
+                .iter()
+                .map(|h| h.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.allow_headers(headers);
         }
-        if !list.is_empty() {
-            cors = cors.vary(list);
+
+        if !self.allow_methods.is_empty() {
+            let methods = self
+                .allow_methods
+                .iter()
+                .map(|m| m.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.allow_methods(methods);
+        }
+
+        if !self.vary.is_empty() {
+            let vary = self
+                .vary
+                .iter()
+                .map(|v| v.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.vary(vary);
         }
 
         if let Some(max_age) = self.max_age {
             cors = cors.max_age(Duration::from_secs(max_age));
         }
+
+        // tracing::info!("cors: {:#?}", cors);
+        // panic!("cors");
 
         Ok(cors)
     }

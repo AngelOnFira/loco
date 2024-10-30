@@ -136,6 +136,7 @@ ulid = { version = "1", optional = true }
 # bg_redis: redis workers
 rusty-sidekiq = { version = "0.8.2", default-features = false, optional = true }
 bb8 = { version = "0.8.1", optional = true }
+url = "2.5.2"
 
 [workspace.dependencies]
 async-trait = { version = "0.1.74" }
