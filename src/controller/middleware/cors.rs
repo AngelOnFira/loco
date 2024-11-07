@@ -11,8 +11,10 @@ use axum::Router as AXRouter;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors;
+use tracing::warn;
+use url::Url;
 
-use crate::{app::AppContext, controller::middleware::MiddlewareLayer, Result};
+use crate::{app::AppContext, controller::middleware::MiddlewareLayer, Result, Error};
 
 /// CORS middleware configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,13 +68,24 @@ impl Cors {
     pub fn empty() -> Self {
         Self {
             enable: true,
-            allow_headers: vec![],
-            allow_methods: vec![],
-            allow_origins: vec![],
+            allow_headers: vec!["*".to_string()],
+            allow_methods: vec!["*".to_string()],
+            allow_origins: vec!["any".to_string()],
             max_age: None,
-            vary: vec![],
+            vary: default_vary_headers(),
         }
     }
+
+    fn normalize_origin(origin: &str) -> String {
+        // Remove trailing slashes and force https if no protocol specified
+        let origin = origin.trim_end_matches('/');
+        if !origin.contains("://") {
+            format!("https://{}", origin)
+        } else {
+            origin.to_string()
+        }
+    }
+
     /// Creates cors layer
     ///
     /// # Errors
@@ -89,50 +102,87 @@ impl Cors {
     /// In all of these cases, the error returned will be the result of the
     /// `parse` method of the corresponding type.
     pub fn cors(&self) -> Result<cors::CorsLayer> {
-        let mut cors: cors::CorsLayer = cors::CorsLayer::permissive();
-
-        let mut list = vec![];
-
-        // testing CORS, assuming https://example.com in the allow list:
-        // $ curl -v --request OPTIONS 'localhost:5150/api/_ping' -H 'Origin: https://example.com' -H 'Acces
-        // look for '< access-control-allow-origin: https://example.com' in response.
-        // if it doesn't appear (test with a bogus domain), it is not allowed.
-        for origin in &self.allow_origins {
-            list.push(origin.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_origin(list);
+        if self.enable && self.allow_origins.is_empty() {
+            warn!("CORS is enabled but no origins are allowed. Please specify at least one origin or use \"any\".");
         }
 
-        let mut list = vec![];
-        for header in &self.allow_headers {
-            list.push(header.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_headers(list);
+        let mut cors = cors::CorsLayer::new();
+
+        if self.allow_origins.contains(&"any".to_string()) {
+            cors = cors.allow_origin(cors::Any);
+        } else if !self.allow_origins.is_empty() {
+            let allowed_origins: Vec<String> = self.allow_origins
+                .iter()
+                .map(|o| Self::normalize_origin(o))
+                .collect();
+
+            // Convert the allowed origins into HeaderValue objects
+            let origin_values: Vec<axum::http::HeaderValue> = allowed_origins
+                .iter()
+                .filter_map(|origin| {
+                    axum::http::HeaderValue::from_str(origin).ok()
+                })
+                .collect();
+
+            cors = cors.allow_origin(origin_values);
         }
 
-        let mut list = vec![];
-        for method in &self.allow_methods {
-            list.push(method.parse()?);
-        }
-        if !list.is_empty() {
-            cors = cors.allow_methods(list);
+        if !self.allow_headers.is_empty() {
+            let headers = self
+                .allow_headers
+                .iter()
+                .map(|h| h.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.allow_headers(headers);
         }
 
-        let mut list = vec![];
-        for v in &self.vary {
-            list.push(v.parse()?);
+        if !self.allow_methods.is_empty() {
+            let methods = self
+                .allow_methods
+                .iter()
+                .map(|m| m.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.allow_methods(methods);
         }
-        if !list.is_empty() {
-            cors = cors.vary(list);
+
+        if !self.vary.is_empty() {
+            let vary = self
+                .vary
+                .iter()
+                .map(|v| v.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            cors = cors.vary(vary);
         }
 
         if let Some(max_age) = self.max_age {
             cors = cors.max_age(Duration::from_secs(max_age));
         }
 
+        // tracing::info!("cors: {:#?}", cors);
+        // panic!("cors");
+
         Ok(cors)
+    }
+
+    pub fn set_origins(&mut self, origins: Vec<String>) -> Result<()> {
+        // Validate and normalize all origins
+        let normalized: Result<Vec<String>, _> = origins
+            .into_iter()
+            .map(|origin| {
+                if origin == "any" {
+                    Ok(origin)
+                } else {
+                    // Try to parse as URL to validate
+                    let normalized = Self::normalize_origin(&origin);
+                    Url::parse(&normalized)
+                        .map_err(|_| Error::Message(format!("Invalid origin: {}", origin)))
+                        .map(|_| normalized)
+                }
+            })
+            .collect();
+
+        self.allow_origins = normalized?;
+        Ok(())
     }
 }
 
@@ -168,6 +218,7 @@ mod tests {
     };
     use insta::assert_debug_snapshot;
     use rstest::rstest;
+    use serial_test::serial;
     use tower::ServiceExt;
 
     use super::*;
@@ -235,4 +286,56 @@ mod tests {
         let middleware = Cors::default();
         assert!(!middleware.is_enabled());
     }
+
+    #[test]
+    fn test_origin_normalization() {
+        let test_cases = vec![
+            ("example.com", "https://example.com"),
+            ("example.com/", "https://example.com"),
+            ("https://example.com", "https://example.com"),
+            ("https://example.com/", "https://example.com"),
+            ("http://example.com", "http://example.com"),
+            ("http://example.com/", "http://example.com"),
+        ];
+
+        for (input, expected) in test_cases {
+            assert_eq!(Cors::normalize_origin(input), expected);
+        }
+    }
+
+    #[rstest]
+    #[case(vec!["example.com"], "https://example.com")]
+    #[case(vec!["example.com/"], "https://example.com")]
+    #[case(vec!["https://example.com"], "https://example.com")]
+    #[case(vec!["https://example.com/"], "https://example.com")]
+    #[tokio::test]
+    async fn test_cors_origin_matching(
+        #[case] allowed_origins: Vec<&str>,
+        #[case] request_origin: &str,
+    ) {
+        let mut middleware = Cors::empty();
+        middleware.allow_origins = allowed_origins.iter().map(|s| s.to_string()).collect();
+
+        let app = Router::new().route("/", get(|| async {}));
+        let app = middleware
+            .apply(app)
+            .expect("apply middleware")
+            .with_state(tests_cfg::app::get_app_context().await);
+
+        let req = Request::builder()
+            .uri("/")
+            .method(Method::GET)
+            .header("Origin", request_origin)
+            .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(req).await.expect("valid response");
+        
+        assert_eq!(
+            response.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+            Some(request_origin)
+        );
+    }
+
+
 }

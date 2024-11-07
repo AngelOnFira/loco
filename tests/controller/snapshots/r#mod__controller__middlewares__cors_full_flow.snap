@@ -1,0 +1,13 @@
+---
+source: tests/controller/middlewares.rs
+expression: "(preflight.headers().get(\"access-control-allow-origin\"),\nactual.headers().get(\"access-control-allow-origin\"),)"
+snapshot_kind: text
+---
+(
+    Some(
+        "https://example.com",
+    ),
+    Some(
+        "https://example.com",
+    ),
+)

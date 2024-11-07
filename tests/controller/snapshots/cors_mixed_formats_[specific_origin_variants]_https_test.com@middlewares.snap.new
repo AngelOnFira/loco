@@ -1,0 +1,9 @@
+---
+source: tests/controller/middlewares.rs
+assertion_line: 628
+expression: "(format!(\"access-control-allow-origin: {:?}\",\nres.headers().get(\"access-control-allow-origin\")),\nformat!(\"vary: {:?}\", res.headers().get(\"vary\")),)"
+---
+(
+    "access-control-allow-origin: Some(\"https://test.com\")",
+    "vary: Some(\"origin, access-control-request-method, access-control-request-headers\")",
+)

@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use axum::http::StatusCode;
 use insta::assert_debug_snapshot;
+use loco_rs::controller::middleware::cors::Cors;
 use loco_rs::{controller::middleware, prelude::*, tests_cfg};
 use rstest::rstest;
 use serial_test::serial;
@@ -442,6 +443,201 @@ async fn powered_by_header(#[case] ident: Option<String>) {
         assert_eq!(header_value.to_str().expect("value"), ident_str);
     } else {
         assert_eq!(header_value.to_str().expect("value"), "loco.rs");
+    }
+
+    handle.abort();
+}
+
+#[rstest]
+#[case("specific_origin", Some(vec!["https://example.com".to_string()]), None, None)]
+#[case("multiple_origins", Some(vec!["https://example.com".to_string(), "https://test.com".to_string()]), None, None)]
+#[case("wildcard_headers", None, Some(vec!["*".to_string()]), None)]
+#[case("specific_headers", None, Some(vec!["authorization".to_string(), "content-type".to_string()]), None)]
+#[case("specific_methods", None, None, Some(vec!["GET".to_string(), "POST".to_string()]))]
+#[tokio::test]
+#[serial]
+async fn cors_specific_configs(
+    #[case] test_name: &str,
+    #[case] allow_origins: Option<Vec<String>>,
+    #[case] allow_headers: Option<Vec<String>>,
+    #[case] allow_methods: Option<Vec<String>>,
+) {
+    configure_insta!();
+
+    let mut ctx: AppContext = tests_cfg::app::get_app_context().await;
+    let mut middleware = Cors::empty();
+    middleware.enable = true;
+
+    if let Some(origins) = allow_origins {
+        middleware.allow_origins = origins;
+    }
+    if let Some(headers) = allow_headers {
+        middleware.allow_headers = headers;
+    }
+    if let Some(methods) = allow_methods {
+        middleware.allow_methods = methods;
+    }
+
+    ctx.config.server.middlewares.cors = Some(middleware);
+    let handle = infra_cfg::server::start_from_ctx(ctx).await;
+
+    // Test preflight request
+    let res = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, infra_cfg::server::get_base_url())
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .send()
+        .await
+        .expect("valid response");
+
+    assert_debug_snapshot!(
+        format!("cors_specific_[{test_name}]"),
+        (
+            format!(
+                "access-control-allow-origin: {:?}",
+                res.headers().get("access-control-allow-origin")
+            ),
+            format!("vary: {:?}", res.headers().get("vary")),
+            format!(
+                "access-control-allow-methods: {:?}",
+                res.headers().get("access-control-allow-methods")
+            ),
+            format!(
+                "access-control-allow-headers: {:?}",
+                res.headers().get("access-control-allow-headers")
+            ),
+            format!("allow: {:?}", res.headers().get("allow")),
+        )
+    );
+
+    handle.abort();
+}
+
+async fn create_test_context_with_cors(cors_config: Option<Cors>) -> AppContext {
+    let mut ctx = tests_cfg::app::get_app_context().await;
+    ctx.config.server.middlewares.cors = cors_config;
+    ctx
+}
+
+#[tokio::test]
+async fn test_cors_full_flow() {
+    let mut ctx = create_test_context_with_cors(Some(Cors {
+        enable: true,
+        allow_origins: vec!["https://example.com".to_string()],
+        allow_methods: vec!["POST".to_string()],
+        allow_headers: vec!["content-type".to_string()],
+        ..Cors::empty()
+    }))
+    .await;
+
+    let handle = infra_cfg::server::start_from_ctx(ctx).await;
+    let client = reqwest::Client::new();
+
+    // Test preflight
+    let preflight = make_cors_request(
+        &client,
+        reqwest::Method::OPTIONS,
+        Some("https://example.com"),
+        Some(vec!["content-type"]),
+    )
+    .await;
+
+    // Test actual request
+    let actual = make_cors_request(
+        &client,
+        reqwest::Method::POST,
+        Some("https://example.com"),
+        None,
+    )
+    .await;
+
+    // Assert both responses
+    assert_debug_snapshot!(
+        "cors_full_flow",
+        (
+            preflight.headers().get("access-control-allow-origin"),
+            actual.headers().get("access-control-allow-origin"),
+        )
+    );
+
+    handle.abort();
+}
+
+async fn make_cors_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    origin: Option<&str>,
+    request_headers: Option<Vec<&str>>,
+) -> reqwest::Response {
+    let mut request = client
+        .request(method.clone(), infra_cfg::server::get_base_url())
+        .header("Host", "localhost:5555");
+
+    if let Some(origin) = origin {
+        request = request.header("Origin", origin);
+    }
+
+    if method == reqwest::Method::OPTIONS {
+        request = request
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                request_headers.unwrap_or_default().join(","),
+            );
+    }
+
+    request.send().await.expect("valid response")
+}
+
+#[rstest]
+#[case("specific_origin_variants", vec![
+    "example.com".to_string(),
+    "https://test.com".to_string(),
+    "http://other.com/".to_string()
+])]
+#[tokio::test]
+#[serial]
+async fn cors_mixed_origin_formats(#[case] test_name: &str, #[case] allow_origins: Vec<String>) {
+    configure_insta!();
+
+    let mut ctx: AppContext = tests_cfg::app::get_app_context().await;
+    let mut middleware = Cors::empty();
+    middleware.enable = true;
+    middleware.allow_origins = allow_origins;
+
+    ctx.config.server.middlewares.cors = Some(middleware);
+    let handle = infra_cfg::server::start_from_ctx(ctx).await;
+
+    // Test with different origin formats
+    let origins_to_test = vec![
+        "https://example.com",
+        "https://test.com",
+        "http://other.com",
+    ];
+
+    for origin in origins_to_test {
+        let res = reqwest::Client::new()
+            .request(reqwest::Method::OPTIONS, infra_cfg::server::get_base_url())
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .expect("valid response");
+
+        assert_debug_snapshot!(
+            format!(
+                "cors_mixed_formats_[{test_name}]_{}",
+                origin.replace("://", "_")
+            ),
+            (
+                format!(
+                    "access-control-allow-origin: {:?}",
+                    res.headers().get("access-control-allow-origin")
+                ),
+                format!("vary: {:?}", res.headers().get("vary")),
+            )
+        );
     }
 
     handle.abort();

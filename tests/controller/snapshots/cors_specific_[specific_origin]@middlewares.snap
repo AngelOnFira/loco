@@ -1,0 +1,12 @@
+---
+source: tests/controller/middlewares.rs
+expression: "(format!(\"access-control-allow-origin: {:?}\",\nres.headers().get(\"access-control-allow-origin\")),\nformat!(\"vary: {:?}\", res.headers().get(\"vary\")),\nformat!(\"access-control-allow-methods: {:?}\",\nres.headers().get(\"access-control-allow-methods\")),\nformat!(\"access-control-allow-headers: {:?}\",\nres.headers().get(\"access-control-allow-headers\")),\nformat!(\"allow: {:?}\", res.headers().get(\"allow\")),)"
+snapshot_kind: text
+---
+(
+    "access-control-allow-origin: Some(\"https://example.com\")",
+    "vary: Some(\"origin, access-control-request-method, access-control-request-headers\")",
+    "access-control-allow-methods: Some(\"*\")",
+    "access-control-allow-headers: Some(\"*\")",
+    "allow: Some(\"GET,HEAD,POST\")",
+)
