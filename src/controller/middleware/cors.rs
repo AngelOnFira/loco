@@ -89,6 +89,7 @@ impl Cors {
     /// In all of these cases, the error returned will be the result of the
     /// `parse` method of the corresponding type.
     pub fn cors(&self) -> Result<cors::CorsLayer> {
+        return Ok(cors::CorsLayer::very_permissive());
         let mut cors: cors::CorsLayer = cors::CorsLayer::permissive();
 
         let mut list = vec![];
